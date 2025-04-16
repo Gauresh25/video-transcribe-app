@@ -20,48 +20,12 @@ const s3 = new AWS.S3();
 const transcribe = new AWS.TranscribeService();
 const bucketName = 'connecttsec';
 
-// Function to check and set up proper bucket permissions for Transcribe
-async function setupBucketPermissionsForTranscribe() {
-  try {
-    console.log('Setting up S3 bucket permissions for Transcribe service...');
-    
-    // This policy grants the Transcribe service permission to read from the bucket
-    const bucketPolicy = {
-      Version: '2012-10-17',
-      Statement: [
-        {
-          Sid: 'TranscribeAccess',
-          Effect: 'Allow',
-          Principal: {
-            Service: 'transcribe.amazonaws.com'
-          },
-          Action: [
-            's3:GetObject',
-            's3:ListBucket'
-          ],
-          Resource: [
-            `arn:aws:s3:::${bucketName}`,
-            `arn:aws:s3:::${bucketName}/*`
-          ]
-        }
-      ]
-    };
-
-    // Apply the bucket policy
-    await s3.putBucketPolicy({
-      Bucket: bucketName,
-      Policy: JSON.stringify(bucketPolicy)
-    }).promise();
-    
-    console.log('Successfully updated bucket policy for Transcribe access');
-  } catch (error) {
-    console.error('Failed to update bucket policy:', error);
-    // Continue anyway - it might work if permissions are already set up correctly
-  }
-}
-
-// Call the setup function when the server starts
-setupBucketPermissionsForTranscribe();
+// Update your CORS configuration
+app.use(cors({
+  origin: '*',  // Allow all origins
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 // Set up temporary storage for uploads
 const storage = multer.diskStorage({
@@ -81,11 +45,7 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 // Enable CORS
-app.use(cors({
-  origin: '*',  // Allow all origins
-  methods: ['GET', 'POST'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
+app.use(cors());
 app.use(express.json());
 
 // Serve the static React app in production
@@ -102,32 +62,26 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
 
     const filePath = req.file.path;
     const fileName = req.file.filename;
-    
-    console.log(`Processing uploaded file: ${fileName}`);
 
     // Upload file to S3
     const fileContent = fs.readFileSync(filePath);
-    const s3Key = `videos/${fileName}`;
     const s3Params = {
       Bucket: bucketName,
-      Key: s3Key,
+      Key: `videos/${fileName}`,
       Body: fileContent,
-      ContentType: req.file.mimetype,
-      ACL: 'bucket-owner-full-control'  // Ensure bucket owner has control
+      ContentType: req.file.mimetype
     };
 
-    console.log(`Uploading to S3: ${s3Key}`);
     await s3.upload(s3Params).promise();
-    console.log('Upload to S3 successful');
 
     // Clean up local file
     fs.unlinkSync(filePath);
 
     // Return success with the S3 key
-    res.json({ key: s3Key });
+    res.json({ key: `videos/${fileName}` });
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: 'Upload failed', details: error.message });
+    res.status(500).json({ error: 'Upload failed' });
   }
 });
 
@@ -142,49 +96,24 @@ app.post('/api/transcribe', async (req, res) => {
 
     // Create a unique job name
     const jobName = `transcription-${Date.now()}`;
-    console.log(`Starting transcription job: ${jobName} for file ${key}`);
-
-    // Check if file exists before starting transcription
-    try {
-      await s3.headObject({
-        Bucket: bucketName,
-        Key: key
-      }).promise();
-      console.log(`Confirmed file exists: s3://${bucketName}/${key}`);
-    } catch (headError) {
-      console.error('File does not exist in S3:', headError);
-      return res.status(404).json({ 
-        error: 'File not found in S3', 
-        details: `The file '${key}' could not be found in the bucket.`
-      });
-    }
-
-    // Set the S3 URI for the media file
-    const mediaFileUri = `s3://${bucketName}/${key}`;
-    console.log(`Media URI for transcription: ${mediaFileUri}`);
 
     // Start transcription job
     const transcribeParams = {
       TranscriptionJobName: jobName,
       LanguageCode: 'en-US',
       Media: {
-        MediaFileUri: mediaFileUri
+        MediaFileUri: `s3://${bucketName}/${key}`
       },
       OutputBucketName: bucketName,
       OutputKey: `transcripts/${jobName}-transcript.json`
     };
 
     await transcribe.startTranscriptionJob(transcribeParams).promise();
-    console.log('Transcription job started successfully');
 
     res.json({ jobName });
   } catch (error) {
     console.error('Transcription error:', error);
-    res.status(500).json({ 
-      error: 'Transcription failed', 
-      details: error.message,
-      code: error.code 
-    });
+    res.status(500).json({ error: 'Transcription failed' });
   }
 });
 
@@ -192,72 +121,48 @@ app.post('/api/transcribe', async (req, res) => {
 app.get('/api/transcribe/:jobName', async (req, res) => {
   try {
     const { jobName } = req.params;
-    console.log(`Checking status of transcription job: ${jobName}`);
 
     const result = await transcribe.getTranscriptionJob({
       TranscriptionJobName: jobName
     }).promise();
 
-    const status = result.TranscriptionJob.TranscriptionJobStatus;
-    console.log(`Job status: ${status}`);
-
-    if (status === 'COMPLETED') {
+    if (result.TranscriptionJob.TranscriptionJobStatus === 'COMPLETED') {
       // Get the transcript JSON file
-      const jsonKey = `transcripts/${jobName}-transcript.json`;
-      console.log(`Fetching completed transcript from: ${jsonKey}`);
-      
-      try {
-        const s3Data = await s3.getObject({
-          Bucket: bucketName,
-          Key: jsonKey
-        }).promise();
-        
-        const transcriptJson = JSON.parse(s3Data.Body.toString());
-        const plainText = transcriptJson.results.transcripts[0].transcript;
+      const getParams = {
+        Bucket: bucketName,
+        Key: `transcripts/${jobName}-transcript.json`
+      };
 
-        // Store the plain text version
-        const plainTextKey = `transcripts/${jobName}-transcript.txt`;
-        console.log(`Storing plain text transcript at: ${plainTextKey}`);
-        
-        await s3.putObject({
-          Bucket: bucketName,
-          Key: plainTextKey,
-          Body: plainText,
-          ContentType: 'text/plain'
-        }).promise();
+      const s3Data = await s3.getObject(getParams).promise();
+      const transcriptJson = JSON.parse(s3Data.Body.toString());
+      const plainText = transcriptJson.results.transcripts[0].transcript;
 
-        res.json({
-          status: 'COMPLETED',
-          textKey: plainTextKey
-        });
-      } catch (s3Error) {
-        console.error('Error retrieving transcript JSON:', s3Error);
-        res.status(500).json({ 
-          error: 'Failed to retrieve transcript', 
-          details: s3Error.message 
-        });
-      }
-    } else if (status === 'FAILED') {
-      const failureReason = result.TranscriptionJob.FailureReason;
-      console.error(`Transcription job failed: ${failureReason}`);
+      // Store the plain text version
+      const plainTextKey = `transcripts/${jobName}-transcript.txt`;
+      await s3.putObject({
+        Bucket: bucketName,
+        Key: plainTextKey,
+        Body: plainText,
+        ContentType: 'text/plain'
+      }).promise();
+
       res.json({
-        status: 'FAILED',
-        reason: failureReason
+        status: 'COMPLETED',
+        textKey: plainTextKey
       });
     } else {
-      // Job still in progress
       res.json({
-        status: status
+        status: result.TranscriptionJob.TranscriptionJobStatus
       });
     }
   } catch (error) {
     console.error('Status check error:', error);
-    res.status(500).json({ error: 'Failed to check status', details: error.message });
+    res.status(500).json({ error: 'Failed to check status' });
   }
 });
 
-// API route to download transcript
-app.get('/api/download/:key(*)', async (req, res) => {
+// API route to download transcript - FIXED
+app.get('/api/download/:key(*)', async (req, res) => {  // Use (*) to match all characters including slashes
   try {
     const key = req.params.key;
     console.log(`Downloading from S3 with key: ${key}`);
@@ -276,10 +181,12 @@ app.get('/api/download/:key(*)', async (req, res) => {
       res.send(transcript);
     } catch (s3Error) {
       console.error('S3 error details:', s3Error);
+      // If the error is because the file doesn't exist, provide a more helpful message
       if (s3Error.code === 'NoSuchKey') {
         return res.status(404).json({ 
           error: 'Transcript file not found',
-          details: `The file '${key}' was not found in the S3 bucket.`
+          details: `The file '${key}' was not found in the S3 bucket.`,
+          suggestion: 'Check if the file path is correct and the transcription job has completed.'
         });
       }
       throw s3Error;
@@ -316,15 +223,14 @@ app.get('/api/check-file/:key(*)', async (req, res) => {
   }
 });
 
-// Serve frontend in production
-app.use(express.static(path.join(__dirname, 'dist')));
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-});
+// Catch-all route to serve React app in production
+if (process.env.NODE_ENV === 'production') {
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+  });
+}
 
-// Start the server
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
-  console.log(`Access locally at http://localhost:${port}`);
-  console.log(`For remote access, use your server's public IP: http://YOUR_PUBLIC_IP:${port}`);
+  console.log(`Access at http://YOUR_PUBLIC_IP:${port}`);
 });
