@@ -4,7 +4,7 @@ import axios from 'axios';
 import './VideoTranscriptionUploader.css';
 
 // API URL - change this to your server URL
-const API_URL = 'http://localhost:3001/api';
+const API_URL = 'http://15.207.109.220:3001/api';
 
 enum Status {
   IDLE = 'idle',

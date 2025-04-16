@@ -20,6 +20,13 @@ const s3 = new AWS.S3();
 const transcribe = new AWS.TranscribeService();
 const bucketName = 'connecttsec';
 
+// Update your CORS configuration
+app.use(cors({
+  origin: '*',  // Allow all origins
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 // Set up temporary storage for uploads
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -223,6 +230,7 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-app.listen(port, () => {
+app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
+  console.log(`Access at http://YOUR_PUBLIC_IP:${port}`);
 });
